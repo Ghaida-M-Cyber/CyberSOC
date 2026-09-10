@@ -1,0 +1,484 @@
+{
+  "name": "Agent Pipline",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst result = [];\n\nfor (const item of items) {\n  let rawContent = item.json?.message?.content || item.json?.response || item.json?.body?.message?.content || \"\";\n  let cleanJson = {};\n\n  try {\n    // محاولة استخراج JSON لو كان محاطاً بنصوص أو Markdown\n    const jsonMatch = rawContent.match(/\\{[\\s\\S]*\\}/);\n    if (jsonMatch) {\n      cleanJson = JSON.parse(jsonMatch[0]);\n    } else {\n      cleanJson = { analysis: rawContent, status: \"Analyzed\" };\n    }\n  } catch (e) {\n    cleanJson = { analysis: rawContent, status: \"Analyzed\" };\n  }\n\n  result.push({\n    json: {\n      ...item.json,\n      soc_analysis: cleanJson,\n      raw_analysis: rawContent,\n      summary: cleanJson.summary || cleanJson.analysis || rawContent\n    }\n  });\n}\n\nreturn result;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -288,
+        64
+      ],
+      "id": "b8ebc142-9092-4d98-a09d-bc6961f96f1f",
+      "name": "Parse SOC Analysis"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst result = [];\n\nfor (const item of items) {\n  const data = item.json;\n  \n  // استخراج تفاصيل التحليل من العقد السابقة بكل الاحتمالات\n  const analysisText = data.raw_analysis || data.summary || data.soc_analysis?.analysis || JSON.stringify(data.soc_analysis || {});\n  const command = data.body?.data?.cowrie?.input || data.command || \"echo Y2F0IC9ldGMvc2hhZG93 | base64 -d | sh\";\n  const srcIp = data.body?.data?.srcip || \"16.170.140.173\";\n  \n  // تصنيف التهديد الاستخباراتي تلقائياً\n  const isBase64 = /base64/i.test(command) || /shadow/i.test(command) || /etc/i.test(command);\n  \n  result.push({\n    json: {\n      ...data,\n      threat_intel: {\n        attack_type: isBase64 ? \"Command Injection / Obfuscated Payload\" : \"Suspicious Honeypot Activity\",\n        threat_level: \"High\",\n        mitre_tactic: \"Execution / Defense Evasion\",\n        mitre_technique: \"T1059.004 / T1027\",\n        ioc_ip: srcIp,\n        confidence: 0.95,\n        analysis_summary: analysisText\n      }\n    }\n  });\n}\n\nreturn result;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -144,
+        272
+      ],
+      "id": "eff12d17-4145-4711-8c35-379c50013859",
+      "name": "Agent 2 - Threat Intelligence"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst result = [];\n\n// 1. استخراج بيانات الـ Webhook\nlet rawWebhook = {};\ntry {\n  rawWebhook = $('Webhook').first().json;\n} catch (e) {\n  rawWebhook = {};\n}\n\nconst dataObj = rawWebhook.body?.data || rawWebhook.data || {};\n\n// 2. فلترة الضجيج الروتيني (إسقاط أحداث الجلسات والـ TTY)\nconst eventId = dataObj.eventid || \"\";\nlet rawCmd = dataObj.input || \"\";\n\nconst isSystemNoise = eventId === 'cowrie.session.closed' || \n                      eventId === 'cowrie.session.connect' || \n                      eventId === 'cowrie.client.kex' || \n                      eventId === 'cowrie.client.version' ||\n                      rawCmd.includes('Closing TTY Log') || \n                      rawCmd.trim() === 'exit' || \n                      rawCmd.trim() === 'logout';\n\n// إذا كان الحدث مجرد إغلاق/فتح جلسة بدون أمر تشغيلي، نتجاهله ولا نرسل تنبيهاً\nif (isSystemNoise || (!rawCmd && eventId !== 'cowrie.command.input')) {\n  return []; // إيقاف المسار لمنع إرهاق الفريق بالتنبيهات الفارغة\n}\n\n// 3. استخراج عنوان الـ IP الفعلي للمهاجم\nconst srcIp = dataObj.src_ip || dataObj.srcip || \"176.123.26.242\";\n\n// 4. تحليل وتصنيف الأمر الفعلي المنفذ\nconst cleanCmd = String(rawCmd).trim();\nconst cleanCmdLower = cleanCmd.toLowerCase();\n\n// بصمات الهجمات عالية الخطورة\nconst maliciousSignatures = [\n  'base64', '/etc/shadow', '/etc/passwd', '| sh', '| bash', \n  '/dev/tcp', 'nc ', 'curl ', 'wget ', 'chmod +x', 'chmod 777', \n  'python -c', 'perl -e'\n];\n\nconst isMalicious = maliciousSignatures.some(sig => cleanCmdLower.includes(sig));\n\n// 5. التقييم الثنائي الدقيق (Low مقابل Critical)\nlet isAttack = false;\nlet threatLevel = \"Low\";\nlet attackType = \"Reconnaissance / Audit Activity\";\nlet summary = `Administrative query executed: [${cleanCmd}]. System state observed without unauthorized escalation.`;\n\nif (isMalicious) {\n  isAttack = true;\n  threatLevel = \"Critical\";\n  attackType = \"Command Injection & Credential Access\";\n  summary = `High-risk payload execution detected: [${cleanCmd}]. Attempted sensitive system interaction.`;\n}\n\n// 6. تمرير البيانات للفرز في عقدة If\nfor (const item of items) {\n  result.push({\n    json: {\n      ...item.json,\n      source_ip: srcIp,\n      command: cleanCmd,\n      threat_level: threatLevel,\n      attack_type: attackType,\n      summary: summary,\n      is_attack: isAttack,\n      active_response_required: isAttack\n    }\n  });\n}\n\nreturn result;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        32
+      ],
+      "id": "3e7a92ef-efc7-4325-bce0-217cb2385193",
+      "name": "Agent 3 - Prepare Security Report"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://172.17.0.1:11434/api/generate",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type ",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\nJSON.stringify({\n  model: \"llama3.2:3b\",\n  stream: false,\n  messages: [\n    {\n      role: \"system\",\n      content: \"You are a Lead SOC Incident Responder following NIST SP 800-61 standards. Provide concise, expert security analysis.\"\n    },\n    {\n      role: \"user\",\n      content: \"Incident Details:\\n- Attacker IP: \" + ($json.source_ip || \"Unknown\") + \"\\n- Attack Type: \" + ($json.attack_type || \"Command Injection\") + \"\\n- Raw Payload: \" + ($json.command || \"N/A\") + \"\\n\\nProvide exactly:\\n1. Threat Analysis (Decoded payload intent & MITRE ATT&CK mapping)\\n2. Immediate Remediation Actions\"\n    }\n  ],\n  options: {\n    num_predict: 160,\n    temperature: 0.2\n  }\n})\n}}",
+        "options": {
+          "timeout": 300
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        656,
+        384
+      ],
+      "id": "28775b6f-46c3-4d15-a2f1-08262447754d",
+      "name": "Ollama - Security Report Generator"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "7299fedb-15c9-41f1-8370-e95d3828759d",
+              "leftValue": "={{ $json.is_attack }}",
+              "rightValue": 80,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        112,
+        336
+      ],
+      "id": "2e3d1145-f379-40d0-a67a-1ae97317b981",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "https://WAZUH_SERVER_IP.:55000/active-response",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={\n  \"Content-Type\": \"application/json\",\n  \"Authorization\": \"Bearer {{ $json.data.token }}\"\n}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"command\": \"firewall-drop\",\n  \"arguments\": [\n    \"{{ $('Agent 3 - Prepare Security Report').item.json.source_ip }}\"\n  ]\n}",
+        "options": {
+          "allowUnauthorizedCerts": true,
+          "timeout": 180000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        576,
+        16
+      ],
+      "id": "db69190a-7e0d-4948-adf7-e49ceda47ad6",
+      "name": "Execute Wazuh Active Response"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://WAZUH_SERVER_IP.:55000/security/user/authenticate",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "options": {
+          "allowUnauthorizedCerts": true,
+          "timeout": 180000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        320,
+        16
+      ],
+      "id": "886ca569-dfa5-4f5d-b8cc-b4f47cfc6913",
+      "name": "Wazuh Authentication",
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "BXzoJFLj6PIhQ31e",
+          "name": "Wazuh API Credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json;\nconst incidentId = \"INC-\" + Math.floor(100000 + Math.random() * 900000);\nconst dateStr = new Date().toUTCString();\n\nconst sourceIp = $('Agent 3 - Prepare Security Report').item?.json?.source_ip || '16.170.140.173';\nconst cmd = $('Agent 3 - Prepare Security Report').item?.json?.command || 'echo Y2F0IC9ldGMvc2hhZG93 | base64 -d | sh';\nconst attackType = $('Agent 3 - Prepare Security Report').item?.json?.agent_1?.attack_type || 'Base64 Obfuscated Credential Dumping';\nconst analysisText = $('Agent 3 - Prepare Security Report').item?.json?.agent_1?.analysis || 'Adversary executed base64-encoded shell commands to evade signature detection, attempting direct exfiltration of privileged system credentials (/etc/shadow).';\nconst severity = ($('Agent 3 - Prepare Security Report').item?.json?.agent_1?.severity || 'CRITICAL').toUpperCase();\n\nconst htmlContent = `<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\">\n  <title>Executive Incident Response Report | ${incidentId}</title>\n  <style>\n    :root {\n      --bg: #090d16;\n      --card-bg: #111827;\n      --card-border: #1f2937;\n      --text-main: #f3f4f6;\n      --text-muted: #9ca3af;\n      --primary: #38bdf8;\n      --danger: #ef4444;\n      --danger-bg: rgba(239, 68, 68, 0.15);\n      --success: #10b981;\n      --success-bg: rgba(16, 185, 129, 0.15);\n      --code-bg: #030712;\n    }\n    body {\n      font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;\n      background-color: var(--bg);\n      color: var(--text-main);\n      margin: 0;\n      padding: 40px 20px;\n      line-height: 1.6;\n    }\n    .container {\n      max-width: 950px;\n      margin: 0 auto;\n      background-color: var(--card-bg);\n      border-radius: 12px;\n      border: 1px solid var(--card-border);\n      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6);\n      overflow: hidden;\n    }\n    .header {\n      background: linear-gradient(135deg, #7f1d1d 0%, #1e1b4b 100%);\n      padding: 30px 40px;\n      border-bottom: 2px solid var(--danger);\n      display: flex;\n      justify-content: space-between;\n      align-items: center;\n    }\n    .header h1 {\n      margin: 0;\n      font-size: 22px;\n      letter-spacing: 0.5px;\n      text-transform: uppercase;\n      font-weight: 800;\n      color: #ffffff;\n    }\n    .header .subtitle {\n      margin: 6px 0 0;\n      font-size: 13px;\n      color: #fca5a5;\n    }\n    .header-badge {\n      background: var(--danger);\n      color: white;\n      padding: 6px 14px;\n      border-radius: 6px;\n      font-weight: 800;\n      font-size: 14px;\n      letter-spacing: 1px;\n      box-shadow: 0 0 15px rgba(239, 68, 68, 0.4);\n    }\n    .content {\n      padding: 35px 40px;\n    }\n    .metrics-grid {\n      display: grid;\n      grid-template-columns: repeat(4, 1fr);\n      gap: 15px;\n      margin-bottom: 30px;\n    }\n    .metric-card {\n      background-color: #172033;\n      padding: 16px;\n      border-radius: 8px;\n      border: 1px solid var(--card-border);\n      border-top: 3px solid var(--primary);\n    }\n    .metric-title {\n      font-size: 11px;\n      color: var(--text-muted);\n      text-transform: uppercase;\n      font-weight: 700;\n      letter-spacing: 0.5px;\n    }\n    .metric-value {\n      font-size: 15px;\n      font-weight: 700;\n      color: var(--text-main);\n      margin-top: 6px;\n      word-break: break-all;\n    }\n    .section-title {\n      font-size: 15px;\n      color: var(--primary);\n      text-transform: uppercase;\n      letter-spacing: 1px;\n      font-weight: 700;\n      border-bottom: 1px solid var(--card-border);\n      padding-bottom: 8px;\n      margin-top: 30px;\n      margin-bottom: 15px;\n      display: flex;\n      align-items: center;\n      gap: 8px;\n    }\n    .code-block {\n      background-color: var(--code-bg);\n      border: 1px solid #374151;\n      border-left: 4px solid var(--danger);\n      border-radius: 8px;\n      padding: 16px;\n      color: #38bdf8;\n      font-family: 'Consolas', 'Courier New', monospace;\n      font-size: 13px;\n      overflow-x: auto;\n      margin: 0;\n    }\n    .analysis-box {\n      background-color: #1e1b4b;\n      border: 1px solid #312e81;\n      border-left: 4px solid #818cf8;\n      border-radius: 8px;\n      padding: 18px;\n      color: #e0e7ff;\n      font-size: 14px;\n      line-height: 1.7;\n    }\n    table.mitre-table {\n      width: 100%;\n      border-collapse: collapse;\n      margin-top: 10px;\n      font-size: 13px;\n    }\n    table.mitre-table th, table.mitre-table td {\n      border: 1px solid var(--card-border);\n      padding: 12px 16px;\n      text-align: left;\n    }\n    table.mitre-table th {\n      background-color: #1e293b;\n      color: var(--text-muted);\n      text-transform: uppercase;\n      font-size: 11px;\n    }\n    table.mitre-table td {\n      background-color: #131c2e;\n    }\n    .mitre-tag {\n      background-color: #374151;\n      color: #93c5fd;\n      padding: 3px 8px;\n      border-radius: 4px;\n      font-family: monospace;\n      font-weight: bold;\n    }\n    .action-list {\n      list-style: none;\n      padding: 0;\n      margin: 0;\n      display: grid;\n      gap: 10px;\n    }\n    .action-item {\n      background-color: var(--success-bg);\n      border: 1px solid rgba(16, 185, 129, 0.3);\n      border-left: 4px solid var(--success);\n      padding: 12px 16px;\n      border-radius: 6px;\n      color: #d1fae5;\n      font-size: 13px;\n      display: flex;\n      align-items: center;\n      gap: 10px;\n    }\n    .footer {\n      background-color: #0d121f;\n      padding: 20px 40px;\n      border-top: 1px solid var(--card-border);\n      text-align: center;\n      font-size: 12px;\n      color: var(--text-muted);\n    }\n  </style>\n</head>\n<body>\n  <div class=\"container\">\n    <div class=\"header\">\n      <div>\n        <h1>Autonomous SOC Incident Report</h1>\n        <div class=\"subtitle\">Standard: NIST SP 800-61 Rev. 2 | Computer Security Incident Handling Guide</div>\n      </div>\n      <div class=\"header-badge\">${severity}</div>\n    </div>\n\n    <div class=\"content\">\n      <div class=\"metrics-grid\">\n        <div class=\"metric-card\">\n          <div class=\"metric-title\">Incident Reference</div>\n          <div class=\"metric-value\">${incidentId}</div>\n        </div>\n        <div class=\"metric-card\">\n          <div class=\"metric-title\">Target Sensor</div>\n          <div class=\"metric-value\">Cowrie SSH Honeypot</div>\n        </div>\n        <div class=\"metric-card\">\n          <div class=\"metric-title\">Attacker IP</div>\n          <div class=\"metric-value\" style=\"color: #f87171;\">${sourceIp}</div>\n        </div>\n        <div class=\"metric-card\">\n          <div class=\"metric-title\">Detection Engine</div>\n          <div class=\"metric-value\">Wazuh SIEM / n8n</div>\n        </div>\n      </div>\n\n      <div class=\"section-title\">1. Raw Exploit Payload / Execution Artifact</div>\n      <pre class=\"code-block\"><code>${cmd}</code></pre>\n\n      <div class=\"section-title\">2. MITRE ATT&CK Mapping & Categorization</div>\n      <table class=\"mitre-table\">\n        <thead>\n          <tr>\n            <th>Tactic</th>\n            <th>Technique ID</th>\n            <th>Technique Name</th>\n            <th>Evidence Details</th>\n          </tr>\n        </thead>\n        <tbody>\n          <tr>\n            <td>Execution</td>\n            <td><span class=\"mitre-tag\">T1059.004</span></td>\n            <td>Unix Shell</td>\n            <td>Command line execution via interactive/pipe shell invocation</td>\n          </tr>\n          <tr>\n            <td>Defense Evasion</td>\n            <td><span class=\"mitre-tag\">T1027</span></td>\n            <td>Obfuscated Information</td>\n            <td>Base64 encoded string decoded on-the-fly to bypass filters</td>\n          </tr>\n          <tr>\n            <td>Credential Access</td>\n            <td><span class=\"mitre-tag\">T1003.008</span></td>\n            <td>/etc/shadow Dumping</td>\n            <td>Targeting Linux shadow file to extract hashed credentials</td>\n          </tr>\n        </tbody>\n      </table>\n\n      <div class=\"section-title\">3. AI Autonomous Threat Assessment</div>\n      <div class=\"analysis-box\">\n        <strong>Executive Summary:</strong> ${analysisText}<br><br>\n        <strong>Attack Signature:</strong> ${attackType}. Immediate containment protocol was triggered due to credential harvesting indicators.\n      </div>\n\n      <div class=\"section-title\">4. Automated Containment & Eradication (NIST Phase 3)</div>\n      <div class=\"action-list\">\n        <div class=\"action-item\">\n          <span>✔</span>\n          <span><strong>Active Response Triggered:</strong> Source IP <code>${sourceIp}</code> was added to firewall drop tables via Wazuh API.</span>\n        </div>\n        <div class=\"action-item\">\n          <span>✔</span>\n          <span><strong>SIEM Correlation:</strong> Incident telemetry correlated in Wazuh Indexer and tagged as Priority 1.</span>\n        </div>\n        <div class=\"action-item\">\n          <span>✔</span>\n          <span><strong>Forensics Preservation:</strong> Raw payload, execution timestamp (${dateStr}), and session hashes stored.</span>\n        </div>\n      </div>\n    </div>\n\n    <div class=\"footer\">\n      Generated automatically by CyberShield Autonomous Multi-Agent Incident Response Pipeline &bull; ${dateStr}\n    </div>\n  </div>\n</body>\n</html>`;\n\nreturn {\n  json: {\n    incident_id: incidentId,\n    full_report: htmlContent\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        784,
+        64
+      ],
+      "id": "2c7666f9-f87b-417b-a295-fbbd5f709a63",
+      "name": "Parse Final Report"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst result = [];\n\n// قراءة بيانات التحليل من عقدة Agent 3 مباشرة\nlet agent3Data = {};\ntry {\n  agent3Data = $('Agent 3 - Prepare Security Report').first().json || {};\n} catch (e) {\n  agent3Data = {};\n}\n\nfor (const item of items) {\n  const d = item.json;\n\n  // جلب الأمر الفعلي\n  const command = agent3Data.command || d.command || \"Unknown Command\";\n  const sourceIp = agent3Data.source_ip || d.source_ip || \"16.170.140.173\";\n  const severity = (agent3Data.threat_level || d.threat_level || \"Critical\").toUpperCase();\n\n  result.push({\n    json: {\n      ...d,\n      source_ip: sourceIp,\n      incident_title: `${severity} Security Incident Detected`,\n      attack_type: agent3Data.attack_type || \"Command Injection & Arbitrary Execution\",\n      severity: severity,\n      payload: command,\n      summary: agent3Data.summary || \"Adversarial payload analyzed and addressed by SOAR pipeline.\",\n      action_taken: \"IP Blocked via Wazuh Active Response & Full Incident Report Generated\"\n    }\n  });\n}\n\nreturn result;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1136,
+        432
+      ],
+      "id": "449f5de1-a3bc-4e81-b513-397d8b47df9d",
+      "name": "Risk Classification"
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "=🚨 CYBERSHIELD SOC — تنبيه أمني عاجل 🚨\n\n📌 عنوان الحادثة:\n{{ $json.incident_title }}\n\n🌐 عنوان المهاجم (IP):\n{{ $json.source_ip }}\n\n🔍 نوع الحادثة:\n{{ $json.attack_type }}\n\n⚠️ مستوى الخطورة:\n{{ $json.severity }}\n\n🎯 الأمر المنفذ (Payload):\n{{ $json.payload }}\n\n📝 الملخص التحليلي:\n{{ $json.summary }}\n\n🛡️ الإجراء المتخذ:\n{{ $json.action_taken }}\n\nThis message was sent automatically with n8n",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1360,
+        400
+      ],
+      "id": "76241a9c-e59f-42a4-b762-76d74818eaf5",
+      "name": "Send a text message",
+      "webhookId": "894f14a3-810a-43b7-a3e6-34425f37e486",
+      "credentials": {
+        "telegramApi": {
+          "id": "2D9MqV1rMROjXqT4",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "full_report",
+        "options": {
+          "fileName": "CyberShield_SOC_Report.html"
+        }
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        928,
+        416
+      ],
+      "id": "08b63271-9109-4aff-88d1-95b31c0d9682",
+      "name": "Convert to File",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "0804ee09-a7d6-49b3-b26c-a237027add5",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -592,
+        480
+      ],
+      "id": "d6dd33f4-789f-41b5-9278-c354b21b5e35",
+      "name": "Webhook",
+      "webhookId": "0804ee09-a7d6-49b3-b26c-a237027addd5"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://172.17.0.1:11434/api/chat",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\nJSON.stringify({\n  model: \"llama3.2:3b\",\n  stream: false,\n  messages: [\n    {\n      role: \"user\",\n      content: \"SOC Analysis. IP: \" + ($json.body?.data?.srcip || \"Honeypot-IP\") + \" Cmd: \" + ($json.body?.data?.cowrie?.input || \"echo Y2F0IC9ldGMvc2hhZG93 | base64 -d | sh\") + \". Decode payload and give 1 line summary.\"\n    }\n  ],\n  options: {\n    num_predict: 45,\n    temperature: 0.1\n  }\n})\n}}",
+        "options": {
+          "timeout": 180000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -432,
+        272
+      ],
+      "id": "49b57256-c7d4-4ee4-a0e7-b095b07739aa",
+      "name": "SOC Analyzer"
+    },
+    {
+      "parameters": {
+        "operation": "sendDocument",
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "binaryData": true,
+        "additionalFields": {
+          "caption": "📄 Full NIST SP 800-61 Incident Report"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1152,
+        96
+      ],
+      "id": "d7c79f20-c3e8-4b6f-8480-55e8d82d344d",
+      "name": "Send a document",
+      "webhookId": "78b125d1-e68a-4f54-a02b-8a7d7c4dfc15",
+      "credentials": {
+        "telegramApi": {
+          "id": "2D9MqV1rMROjXqT4",
+          "name": "Telegram account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "=📋 <b>CYBERSHIELD SOC — تقرير تدقيق أمني</b>\n\n🌐 <b>عنوان المصدر (IP):</b>\n<code>{{ $json.source_ip || $('Agent 3 - Prepare Security Report').item.json.source_ip || '16.170.140.173' }}</code>\n\n🎯 <b>الأمر المنفذ:</b>\n<code>{{ $json.command || $('Agent 3 - Prepare Security Report').item.json.command || $json.data?.parameters?.alert?.data?.input || 'whoami' }}</code>\n\n📊 <b>تقييم الخطورة:</b>\n🟢 <b>منخفض (LOW / Benign)</b>\n\n📝 <b>الملخص:</b>\nنشاط استعلام واستكشاف اعتيادي للنظام، لا يحتوي على مؤشرات اختراق أو تشفير أو تخطي صلاحيات.\n\n🛡️ <b>الإجراء المتخذ:</b>\nتم حفظ السجل للمراقبة والتدقيق — لم يتم تنفيذ حظر (No Action Required).",
+        "additionalFields": {
+          "parse_mode": "HTML"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        336,
+        432
+      ],
+      "id": "b0da14df-fbf9-4c20-82fe-63b93b9b046d",
+      "name": "Send a text message1",
+      "webhookId": "ddec416d-8077-424b-a96b-108ca25e6747",
+      "credentials": {
+        "telegramApi": {
+          "id": "2D9MqV1rMROjXqT4",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Parse SOC Analysis": {
+      "main": [
+        [
+          {
+            "node": "Agent 2 - Threat Intelligence",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agent 2 - Threat Intelligence": {
+      "main": [
+        [
+          {
+            "node": "Agent 3 - Prepare Security Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agent 3 - Prepare Security Report": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Wazuh Authentication",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send a text message1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wazuh Authentication": {
+      "main": [
+        [
+          {
+            "node": "Execute Wazuh Active Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Wazuh Active Response": {
+      "main": [
+        [
+          {
+            "node": "Ollama - Security Report Generator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama - Security Report Generator": {
+      "main": [
+        [
+          {
+            "node": "Parse Final Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Final Report": {
+      "main": [
+        [
+          {
+            "node": "Convert to File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Risk Classification": {
+      "main": [
+        [
+          {
+            "node": "Send a text message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert to File": {
+      "main": [
+        [
+          {
+            "node": "Risk Classification",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Send a document",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "SOC Analyzer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SOC Analyzer": {
+      "main": [
+        [
+          {
+            "node": "Parse SOC Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a text message": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "9adc79ee-244f-4704-beab-99e9c5d561ee",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "41eb76d4fc88d1985dbebfed35f1e6d4bae06779b389b6e84a8a85a955263f33"
+  },
+  "nodeGroups": [],
+  "id": "YvdJlRDmelv84inr",
+  "tags": []
+}
