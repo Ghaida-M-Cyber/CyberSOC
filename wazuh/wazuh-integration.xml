@@ -1,0 +1,8 @@
+  <integration>
+   <name>custom-webhook</name>
+   <hook_url>https://YOUR_N8N_DOMAIN_OR_IP/webhook/YOUR_WEBHOOK_PATH</hook_url>
+   <level>6</level>
+   <rule_id>100300</rule_id>
+   <alert_format>json</alert_format>
+  </integration>
+</ossec_config>

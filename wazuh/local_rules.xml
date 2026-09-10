@@ -1,0 +1,35 @@
+<!-- Local rules -->
+
+<group name="local,syslog,sshd,">
+
+  <rule id="100001" level="5">
+    <if_sid>5716</if_sid>
+    <srcip>1.1.1.1</srcip>
+    <description>sshd: authentication failed from IP 1.1.1.1.</description>
+    <group>authentication_failed,pci_dss_10.2.4,pci_dss_10.2.5,</group>
+  </rule>
+
+</group>
+
+<group name="local,cowrie,honeypot,">
+
+  <rule id="100300" level="10">
+    <decoded_as>json</decoded_as>
+    <field name="eventid">^cowrie\.</field>
+    <description>Cowrie Honeypot Attack detected - Event: $(eventid)</description>
+    <mitre>
+      <id>T1078</id>
+    </mitre>
+    <group>cowrie,honeypot,attack,</group>
+  </rule>
+
+  <rule id="100301" level="12" frequency="3" timeframe="120">
+    <if_matched_sid>100300</if_matched_sid>
+    <same_field>src_ip</same_field>
+    <description>Cowrie: Repeated attack from $(src_ip) (3 times in 2m) - Triggering Block</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+    <group>cowrie,honeypot,attack_repeated,</group>
+  </rule>
+</group>
